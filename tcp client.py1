@@ -1,0 +1,45 @@
+import socket
+
+# Server details
+SERVER_HOST = 'localhost'  # Replace with the server's IP address or hostname
+SERVER_PORT = 12345        # Replace with the server's port number
+
+def run_tcp_client():
+    # Create a TCP/IP socket
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    try:
+        # Connect to the server
+        client_socket.connect((SERVER_HOST, SERVER_PORT))
+        print(f"Connected to {SERVER_HOST}:{SERVER_PORT}")
+
+        while True:
+            # Get user input for the message to send
+            message = input("Enter message to send (or 'quit' to exit): ")
+
+            if message.lower() == 'quit':
+                break
+
+            # Send data to the server
+            # Encode the message string to bytes before sending
+            client_socket.sendall(message.encode('utf-8'))
+            print(f"Sent: {message}")
+
+            # Receive data from the server
+            # The buffer size (e.g., 1024) determines how much data to receive at once
+            data = client_socket.recv(1024)
+            # Decode the received bytes back to a string
+            response = data.decode('utf-8')
+            print(f"Received: {response}")
+
+    except ConnectionRefusedError:
+        print(f"Connection refused. Ensure the server is running on {SERVER_HOST}:{SERVER_PORT}")
+    except Exception as e:
+        print(f"An error occurred: {e}")
+    finally:
+        # Close the socket
+        client_socket.close()
+        print("Connection closed.")
+
+if __name__ == "__main__":
+    run_tcp_client()
