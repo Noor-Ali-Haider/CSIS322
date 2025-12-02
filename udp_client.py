@@ -1,11 +1,11 @@
-
+# udp_client.py
 import socket
 import threading
 import sys
 import time
 import collections
 
-from common import pack_message, unpack_message, pretty
+from common import pack_message, unpack_message, pretty  # or udp_server_common
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 6000
@@ -31,6 +31,13 @@ metrics = {
     "tx_total": 0,
 }
 
+metrics_lock = threading.Lock()
+
+
+def metric_inc(key: str):
+    with metrics_lock:
+        metrics[key] += 1
+
 
 def next_seq() -> int:
     """Return the next sequence number for outgoing messages."""
@@ -54,12 +61,14 @@ def note_incoming_seq(sender: str, seq: int) -> str:
 
     last = incoming_last_seq.get(sender, -1)
     if seq == last + 1:
+        # Perfectly in order
         incoming_last_seq[sender] = seq
         incoming_gap_count[sender] = 0
         deq.append(seq)
         return "in-order"
     elif seq > last + 1:
         # Forward jump: there is a gap
+        # We treat seq as "highest seen" even if some are missing.
         incoming_last_seq[sender] = max(last, seq)
         deq.append(seq)
         incoming_gap_count[sender] = incoming_gap_count.get(sender, 0) + 1
@@ -71,7 +80,7 @@ def note_incoming_seq(sender: str, seq: int) -> str:
         return "old"
 
 
-def recv_loop(sock: socket.socket, username: str):
+def recv_loop(sock: socket.socket):
     """
     Receive loop running in a thread.
     Verifies checksum, detects ordering issues, and prints formatted messages.
@@ -83,11 +92,11 @@ def recv_loop(sock: socket.socket, username: str):
             # Socket likely closed because user quit
             break
 
-        metrics["rx_total"] += 1
+        metric_inc("rx_total")
 
         ok, obj, err = unpack_message(data)
         if not ok or obj is None:
-            metrics["rx_bad_checksum"] += 1
+            metric_inc("rx_bad_checksum")
             print(f"[client] Dropped bad message from {addr}: {err}")
             continue
 
@@ -96,16 +105,16 @@ def recv_loop(sock: socket.socket, username: str):
         sender = msg.get("sender", "unknown")
         seq = msg.get("seq")
 
-        # For integrity: we already verified checksum via unpack_message (ok flag).
-        # For ordering: we track all non-system messages with a sequence number.
+        # For integrity: checksum verification already done via unpack_message (ok flag).
+        # For ordering: we track all messages with a sequence number.
         if seq is not None:
             status = note_incoming_seq(sender, seq)
             if status == "duplicate":
-                metrics["rx_duplicates"] += 1
+                metric_inc("rx_duplicates")
                 print(f"[client] Notice: duplicate seq from {sender}: {seq}")
                 # still print it so user sees what arrived
             elif status in ("gap", "old"):
-                metrics["rx_out_of_order"] += 1
+                metric_inc("rx_out_of_order")
                 if incoming_gap_count.get(sender, 0) >= INCOMING_GAP_ALERT_GRACE:
                     print(
                         f"[client] Warning: sequence gaps/out-of-order from {sender} "
@@ -123,14 +132,18 @@ def recv_loop(sock: socket.socket, username: str):
 
 
 def send_join(sock: socket.socket, server_addr, username: str):
-    """Send join message to server (with seq=0)."""
+    """
+    Send join message to server with seq=0.
+    Subsequent calls to next_seq() will start from 1.
+    """
     global next_seq_value
     with seq_lock:
-        next_seq_value = 0  # reset so the next call (join) uses seq=1
-    join_seq = next_seq()
+        next_seq_value = 0
+        join_seq = 0
+
     raw = pack_message("join", username, text=f"{username} joining via UDP", seq=join_seq)
     sock.sendto(raw, server_addr)
-    metrics["tx_total"] += 1
+    metric_inc("tx_total")
     print(f"[client] Sent join (seq={join_seq})")
 
 
@@ -160,7 +173,7 @@ def input_loop(sock: socket.socket, server_addr, username: str):
             seq = next_seq()
             raw = pack_message(kind, username, text=text, seq=seq)
             sock.sendto(raw, server_addr)
-            metrics["tx_total"] += 1
+            metric_inc("tx_total")
 
             if line == "/quit":
                 print("[client] Quitting...")
@@ -201,7 +214,7 @@ def main():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
     # Start receiver thread
-    t = threading.Thread(target=recv_loop, args=(sock, username), daemon=True)
+    t = threading.Thread(target=recv_loop, args=(sock,), daemon=True)
     t.start()
 
     # Send join message
