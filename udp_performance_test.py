@@ -1,13 +1,14 @@
-
+# udp_performance_test.py
 import socket
 import sys
 import time
 from statistics import mean
 
-from common import pack_message, unpack_message
+from common import pack_message, unpack_message  # or udp_server_common
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 6000
+
 
 def run_perf_test(
     username: str,
@@ -20,63 +21,61 @@ def run_perf_test(
     """
     Simple sequential latency/loss test.
     Sends num_messages chat packets and waits for ACKs.
-    Measures RTT and loss rate.
+    Measures RTT (ms) and loss rate (%).
     """
     server_addr = (host, port)
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.settimeout(timeout)
 
-    # 1) Join first so the server knows this user
-    join_raw = pack_message("join", username, text="perf test join", seq=0)
-    sock.sendto(join_raw, server_addr)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.settimeout(timeout)
 
-    print(
-        f"[perf] Running UDP performance test against {host}:{port} "
-        f"(messages={num_messages}, payload={payload_size} bytes, timeout={timeout}s)"
-    )
+        # 1) Join first so the server knows this user
+        join_raw = pack_message("join", username, text="perf test join", seq=0)
+        sock.sendto(join_raw, server_addr)
 
-    rtts = []          # list of round-trip times in ms
-    sent = 0
-    received = 0
+        print(
+            f"[perf] Running UDP performance test against {host}:{port} "
+            f"(messages={num_messages}, payload={payload_size} bytes, timeout={timeout}s)"
+        )
 
-    for i in range(1, num_messages + 1):
-        text = f"ping-{i}-".ljust(payload_size, "x")
-        seq = i  # use i as sequence number for simplicity
+        rtts = []          # list of round-trip times in ms
+        sent = 0
+        received = 0
 
-        raw = pack_message("chat", username, text=text, seq=seq)
-        start = time.perf_counter()
-        sock.sendto(raw, server_addr)
-        sent += 1
+        for i in range(1, num_messages + 1):
+            # Construct a payload of fixed size
+            text = f"ping-{i}-".ljust(payload_size, "x")
+            seq = i  # use i as sequence number for simplicity
 
-        try:
-            while True:
-                data, addr = sock.recvfrom(65535)
-                ok, obj, err = unpack_message(data)
-                if not ok or obj is None:
-                    # bad checksum, ignore this packet and continue waiting
-                    print(f"[perf] Ignoring corrupt packet: {err}")
-                    continue
+            raw = pack_message("chat", username, text=text, seq=seq)
+            start = time.perf_counter()
+            sock.sendto(raw, server_addr)
+            sent += 1
 
-                msg = obj["msg"]
-                kind = msg.get("kind")
-                ack_seq = msg.get("seq")
+            try:
+                while True:
+                    data, addr = sock.recvfrom(65535)
+                    ok, obj, err = unpack_message(data)
+                    if not ok or obj is None:
+                        # bad checksum, ignore this packet and continue waiting
+                        print(f"[perf] Ignoring corrupt packet: {err}")
+                        continue
 
-                # We only care about ACKs for this specific seq
-                if kind == "ack" and ack_seq == seq:
-                    rtt_ms = (time.perf_counter() - start) * 1000.0
-                    rtts.append(rtt_ms)
-                    received += 1
-                    break
-                else:
-                    # Some other packet; ignore for this test
-                    continue
+                    msg = obj["msg"]
+                    kind = msg.get("kind")
+                    ack_seq = msg.get("seq")
+                    target = msg.get("target")
 
-        except socket.timeout:
-            # No ACK received within timeout
-            print(f"[perf] WARNING: no ACK for seq={seq} within {timeout}s (possible loss)")
-            continue
-
-    sock.close()
+                    # We only care about ACKs for this specific seq and this user
+                    if kind == "ack" and ack_seq == seq and target == username:
+                        rtt_ms = (time.perf_counter() - start) * 1000.0
+                        rtts.append(rtt_ms)
+                        received += 1
+                        break
+                    # Some other packet; ignore for this test and keep waiting
+            except socket.timeout:
+                # No ACK received within timeout
+                print(f"[perf] WARNING: no ACK for seq={seq} within {timeout}s (possible loss)")
+                continue
 
     # ----- Report results -----
     lost = sent - received
